@@ -2,14 +2,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import pandas as pd
-
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 from sklearn.svm import SVC
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
+from sklearn.metrics import (classification_report, confusion_matrix, roc_curve, auc,
+                           precision_score, recall_score, f1_score, accuracy_score,
+                           precision_recall_curve)  # Add this import
 import warnings
 from pandas.errors import EmptyDataError
 import gc
@@ -25,6 +26,10 @@ class DataMiningSVMGUI:
         self.df = None
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
+
+        # Initialize feature selection variables first
+        self.feature1_var = tk.StringVar()
+        self.feature2_var = tk.StringVar()
 
         # Create Paned Window
         self.paned = tk.PanedWindow(root, orient=tk.HORIZONTAL)
@@ -65,6 +70,23 @@ class DataMiningSVMGUI:
         load_btn = ttk.Button(load_frame, text="Load CSV", command=self.load_csv)
         load_btn.pack(fill='x', pady=5)
         self.create_tooltip(load_btn, "Load a CSV dataset for analysis")
+        
+        # Feature Selection section
+        feature_frame = ttk.LabelFrame(self.left_frame, text="Hyperplane Section", padding=5)
+        feature_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(feature_frame, text="Feature 1:").pack(fill='x', pady=2)
+        self.feature1_combo = ttk.Combobox(feature_frame, textvariable=self.feature1_var, state='readonly')
+        self.feature1_combo.pack(fill='x', pady=2)
+        
+        ttk.Label(feature_frame, text="Feature 2:").pack(fill='x', pady=2)
+        self.feature2_combo = ttk.Combobox(feature_frame, textvariable=self.feature2_var, state='readonly')
+        self.feature2_combo.pack(fill='x', pady=2)
+        
+        # Add Visualize Features button
+        viz_btn = ttk.Button(feature_frame, text="Visualize Features", 
+                          command=lambda: self.run_in_thread(self.visualize_features))
+        viz_btn.pack(fill='x', pady=5)
         
         # SVM Parameters section
         svm_frame = ttk.LabelFrame(self.left_frame, text="SVM Parameters", padding=5)
@@ -207,6 +229,19 @@ class DataMiningSVMGUI:
                 except Exception as e:
                     self.show_warning(f"Could not encode column {col}", str(e))
             
+            # Update feature selection dropdowns
+            all_features = list(self.df.columns)
+            self.feature1_combo['values'] = all_features
+            self.feature2_combo['values'] = all_features
+            
+            # Set default features if available
+            if 'age' in all_features and 'hrs_sitting' in all_features:
+                self.feature1_var.set('age')
+                self.feature2_var.set('hrs_sitting')
+            else:
+                self.feature1_var.set(all_features[0])
+                self.feature2_var.set(all_features[1] if len(all_features) > 1 else all_features[0])
+            
             self.show_status("Ready")
             self.root.update()
         except Exception as e:
@@ -222,13 +257,16 @@ class DataMiningSVMGUI:
         messagebox.showwarning(title, message)
         
     def run_svm_classification(self):
-        if not self.validate_dataset(self.df):  # Changed from validate_data to validate_dataset
+        if not self.validate_dataset(self.df):
             return
             
         try:
             target = self.select_target_column("Select Target for SVM Classification")
             if not target:
                 return
+
+            # Store target name for display
+            self.current_target = target
                 
             # Enhanced target validation
             if pd.api.types.is_float_dtype(self.df[target]):
@@ -237,7 +275,7 @@ class DataMiningSVMGUI:
                 return
                 
             unique_values = self.df[target].nunique()
-            if unique_values > 20:  # Increased threshold slightly but still reasonable
+            if unique_values > 20:
                 self.show_warning("Invalid Target",
                     "Selected column has too many unique values. Please select a categorical column.")
                 return
@@ -249,102 +287,376 @@ class DataMiningSVMGUI:
             def process_svm():
                 try:
                     self.show_status("Preparing data...")
-                    X = self.df.drop(columns=[target])
+                    X = self.df[[self.feature1_var.get(), self.feature2_var.get()]]
                     y = self.df[target]
                     
-                    self.show_status("Scaling features...")
+                    # Scale features
                     X_scaled = self.scaler.fit_transform(X)
-                    
-                    self.show_status("Splitting data...")
-                    X_train, X_test, y_train, y_test = train_test_split(
-                        X_scaled, y, test_size=0.3, random_state=42
-                    )
                     
                     self.show_status("Training SVM model...")
                     svm = SVC(kernel=self.kernel_var.get(),
-                             C=self.c_var.get(),
-                             random_state=42,
-                             probability=True)
-                    svm.fit(X_train, y_train)
+                            C=self.c_var.get(),
+                            random_state=42,
+                            probability=True)
+                    svm.fit(X_scaled, y)
                     
-                    self.show_status("Computing predictions...")
-                    y_pred = svm.predict(X_test)
-                    y_pred_proba = svm.predict_proba(X_test)
+                    self.show_status("Computing metrics...")
+                    y_pred = svm.predict(X_scaled)
+                    y_proba = svm.predict_proba(X_scaled)
                     
-                    self.show_status("Calculating metrics...")
-                    self.calculate_and_display_metrics(y_test, y_pred, y_pred_proba)
+                    # Display comprehensive results in single window
+                    self.display_full_results(X_scaled, y, y_pred, y_proba, svm, target)
                     
                 except Exception as e:
-                    self.show_error("SVM Classification Error", str(e))
+                    self.show_error("SVM Error", str(e))
                 finally:
-                    self.show_status("Ready")
                     self.stop_progress()
             
-            self.start_progress()
-            threading.Thread(target=process_svm).start()
+            self.run_in_thread(process_svm)
             
         except Exception as e:
-            self.show_error("Error", f"SVM Classification failed: {str(e)}")
+            self.show_error("Error", str(e))
 
-    def calculate_and_display_metrics(self, y_test, y_pred, y_pred_proba):
-        """Safely calculate and display metrics"""
+    def display_full_results(self, X, y_true, y_pred, y_proba, model, target_name):
+        """Display CM, ROC, PR (Lift), and classification report in one figure"""
         try:
-            # Ensure binary classification for ROC
-            n_classes = len(np.unique(y_test))
-            if n_classes != 2:
-                self.show_warning("Metric Calculation",
-                    "ROC curve is only available for binary classification. Showing other metrics.")
-                
-            conf_matrix = confusion_matrix(y_test, y_pred)
-            class_report = classification_report(y_test, y_pred)
-            
-            # Safe specificity calculation
+            conf_matrix = confusion_matrix(y_true, y_pred)
+            class_report = classification_report(y_true, y_pred)
+            n_classes = len(np.unique(y_true))
+
             try:
-                specificity = self.calculate_specificity(y_test, y_pred)
+                specificity = self.calculate_specificity(y_true, y_pred)
             except:
                 specificity = None
+
+            # Create figure based on number of classes
+            if n_classes == 2:
+                # For binary classification: 2x2 subplot
+                fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+                axes = axes.flatten()  # Convert to 1D array for easier indexing
+            else:
+                # For multiclass: Use single row with 2 plots
+                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                axes = [axes[0], axes[1], None, None]  # Pad with None for consistent indexing
+
+            # Confusion Matrix (always show)
+            sns.heatmap(conf_matrix, annot=True, fmt='d', ax=axes[0], cmap='Blues')
+            axes[0].set_title('Confusion Matrix')
+
+            # Classification Report (always show)
+            metrics_text = f"SVM Classification Report\nTarget: {target_name}\n\n{class_report}"
+            if specificity is not None:
+                metrics_text += f"\nSpecificity: {specificity:.4f}"
+            axes[1].text(0.05, 0.95, metrics_text,
+                        fontfamily='monospace', fontsize=10,
+                        verticalalignment='top')
+            axes[1].axis('off')
+
+            # ROC and Lift curves only for binary classification
+            if n_classes == 2 and axes[2] is not None:
+                # ROC Curve
+                fpr, tpr, _ = roc_curve(y_true, y_proba[:, 1])
+                roc_auc = auc(fpr, tpr)
+                axes[2].plot(fpr, tpr, label=f'ROC (AUC = {roc_auc:.2f})')
+                axes[2].plot([0, 1], [0, 1], 'k--')
+                axes[2].set_title('ROC Curve')
+                axes[2].set_xlabel('False Positive Rate')
+                axes[2].set_ylabel('True Positive Rate')
+                axes[2].legend()
+
+                # Lift Curve
+                precision, recall, _ = precision_recall_curve(y_true, y_proba[:, 1])
+                axes[3].plot(recall, precision, label='Lift Curve', color='purple')
+                axes[3].set_title('Lift Curve (Precision vs Recall)')
+                axes[3].set_xlabel('Recall')
+                axes[3].set_ylabel('Precision')
+                axes[3].legend()
+
+            plt.tight_layout()
+            self.show_plot(fig, additional_info="SVM Evaluation Summary")
+
+        except Exception as e:
+            self.show_error("Visualization Error", str(e))
+
+    def plot_decision_boundary(self, X, y, clf, feature_names, title=None):
+        """Plot SVM decision boundary and margins"""
+        try:
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            # Create mesh grid for decision boundary
+            x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+            y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+            xx, yy = np.meshgrid(
+                np.linspace(x_min, x_max, 200),
+                np.linspace(y_min, y_max, 200)
+            )
+            
+            # Plot decision regions
+            Z = clf.predict(np.c_[xx.ravel(), yy.ravel()])
+            Z = Z.reshape(xx.shape)
+            ax.contourf(xx, yy, Z, alpha=0.3, cmap='RdYlBu')
+            
+            # Plot decision boundary and margins
+            if hasattr(clf, 'decision_function'):
+                Z_decision = clf.decision_function(np.c_[xx.ravel(), yy.ravel()])
+                Z_decision = Z_decision.reshape(xx.shape)
+                ax.contour(xx, yy, Z_decision, colors='k',
+                          levels=[-1, 0, 1], alpha=0.5,
+                          linestyles=['--', '-', '--'])
+            
+            # Plot support vectors
+            if hasattr(clf, 'support_vectors_'):
+                ax.scatter(clf.support_vectors_[:, 0], clf.support_vectors_[:, 1],
+                          s=100, linewidth=1, facecolors='none', edgecolors='k',
+                          label='Support Vectors')
+            
+            # Plot training data
+            scatter = ax.scatter(X[:, 0], X[:, 1], c=y, cmap='RdYlBu',
+                               alpha=0.8, label='Training Data')
+            plt.colorbar(scatter)
+            
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(feature_names[1])
+            ax.set_title(title or 'SVM Decision Boundary')
+            ax.legend()
+            
+            plt.tight_layout()
+            return fig
+            
+        except Exception as e:
+            self.show_error("Visualization Error", str(e))
+            return None
+
+    def visualize_features(self):
+        """Feature visualization with maximized margin hyperplane and metrics"""
+        if not self.validate_dataset(self.df):
+            return
+            
+        try:
+            feature1 = self.feature1_var.get()
+            feature2 = self.feature2_var.get()
+            
+            if not feature1 or not feature2:
+                self.show_warning("Feature Selection", "Please select two features")
+                return
+            
+            # Ask user to select target column manually
+            target = self.select_target_column("Select Target for Visualization")
+            
+            if not target:
+                return
+
+            # Ensure binary classification
+            if self.df[target].nunique() != 2:
+                self.show_warning("Visualization Error", "Target must have exactly 2 unique classes.")
+                return
+            
+            # Prepare data
+            X = self.df[[feature1, feature2]].values
+            y = self.df[target]
+            
+            # Scale features for better SVM performance
+            X_scaled = self.scaler.fit_transform(X)
+            
+            # Train linear SVM with C=1.0 for clear margin visualization
+            svm = SVC(kernel='linear', C=1.0, random_state=42, probability=True)  # Add probability=True
+            svm.fit(X_scaled, y)
             
             # Create visualization
-            self.display_results(conf_matrix, class_report, specificity,
-                               y_test, y_pred_proba if n_classes == 2 else None)
-                               
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            # Plot data points first
+            classes = np.unique(y)
+            colors = ['#2ecc71', '#e74c3c']  # Green for class 0, Red for class 1
+            for i, cls in enumerate(classes):
+                mask = y == cls
+                ax.scatter(X_scaled[mask, 0], X_scaled[mask, 1],
+                          c=colors[i], label=f'Class {cls}',
+                          alpha=0.6, s=100)
+            
+            # Get hyperplane coefficients
+            w = svm.coef_[0]
+            b = svm.intercept_[0]
+            margin = 1 / np.sqrt(np.sum(w ** 2))
+            
+            # Create mesh grid for decision boundary
+            x_min, x_max = X_scaled[:, 0].min() - 0.5, X_scaled[:, 0].max() + 0.5
+            y_min, y_max = X_scaled[:, 1].min() - 0.5, X_scaled[:, 1].max() + 0.5
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100),
+                               np.linspace(y_min, y_max, 100))
+            
+            # Plot decision boundary (hyperplane)
+            Z = (w[0] * xx + w[1] * yy + b)
+            
+            # Plot hyperplane (solid line)
+            ax.contour(xx, yy, Z, levels=[0], colors='k', linestyles='-', linewidths=2,
+                      label='Hyperplane')
+            
+            # Plot margins (dashed lines)
+            ax.contour(xx, yy, Z, levels=[-1, 1], colors='k', linestyles='--', linewidths=1)
+            
+            # Highlight support vectors
+            ax.scatter(svm.support_vectors_[:, 0], svm.support_vectors_[:, 1],
+                      s=300, linewidth=2, facecolors='none', edgecolors='k',
+                      label='Support Vectors')
+            
+            # Add margin width annotation
+            ax.text(0.02, 0.98, f'Margin Width: {margin:.3f}',
+                   transform=ax.transAxes, fontsize=10,
+                   verticalalignment='top', bbox=dict(boxstyle='round',
+                                                   facecolor='white',
+                                                   alpha=0.8))
+            
+            # Customize plot
+            ax.set_xlabel(f'Scaled {feature1}', fontsize=12)
+            ax.set_ylabel(f'Scaled {feature2}', fontsize=12)
+            ax.set_title('SVM Maximum Margin Hyperplane\n' + 
+                        f'Features: {feature1} vs {feature2}\n' +
+                        f'Target: {target}',
+                        fontsize=14, pad=20)
+            
+            ax.legend(loc='upper right', fontsize=10)
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            plt.tight_layout()
+            self.show_plot(fig, "SVM Maximum Margin Analysis")
+            
+            # Add metrics calculation and display
+            y_pred = svm.predict(X_scaled)
+            y_proba = svm.predict_proba(X_scaled)
+            self.show_metrics(target, y, y_pred, y_proba, svm)
+            
+        except Exception as e:
+            self.show_error("Visualization Error", str(e))
+
+    def create_svm_visualization(self, X, y, svm_model, feature_names, target_name):
+        """Create enhanced SVM visualization with clear decision boundary and margins"""
+        try:
+            fig, ax = plt.subplots(figsize=(12, 8))
+            
+            # Create mesh grid for decision boundary
+            margin = 0.5
+            x_min, x_max = X[:, 0].min() - margin, X[:, 0].max() + margin
+            y_min, y_max = X[:, 1].min() - margin, X[:, 1].max() + margin
+            
+            xx, yy = np.meshgrid(
+                np.linspace(x_min, x_max, 200),
+                np.linspace(y_min, y_max, 200)
+            )
+            
+            # Get predictions and decision function values
+            mesh_points = np.c_[xx.ravel(), yy.ravel()]
+            Z = svm_model.predict(mesh_points)
+            Z = Z.reshape(xx.shape)
+            
+            # Plot decision regions with transparent colors
+            ax.contourf(xx, yy, Z, alpha=0.2, cmap='RdYlGn')
+            
+            # Plot decision boundary and margins
+            if hasattr(svm_model, 'decision_function'):
+                Z_decision = svm_model.decision_function(mesh_points)
+                Z_decision = Z_decision.reshape(xx.shape)
+                
+                # Plot decision boundary (solid line)
+                ax.contour(xx, yy, Z_decision, levels=[0],
+                          colors='k', linestyles='-', linewidths=2)
+                
+                # Plot margins (dashed lines)
+                ax.contour(xx, yy, Z_decision, levels=[-1, 1],
+                          colors='k', linestyles='--', linewidths=1)
+                
+                # Add margin width annotation
+                if svm_model.kernel == 'linear':
+                    w = svm_model.coef_[0]
+                    margin_width = 2 / np.sqrt(np.sum(w ** 2))
+                    ax.text(0.02, 0.98, f'Margin Width: {margin_width:.3f}',
+                           transform=ax.transAxes, fontsize=10,
+                           verticalalignment='top', bbox=dict(boxstyle='round',
+                                                           facecolor='white',
+                                                           alpha=0.8))
+            
+            # Plot support vectors with distinct marking
+            if hasattr(svm_model, 'support_vectors_'):
+                ax.scatter(svm_model.support_vectors_[:, 0],
+                          svm_model.support_vectors_[:, 1],
+                          s=300, linewidth=1, facecolors='none',
+                          edgecolors='k', label='Support Vectors')
+            
+            # Plot training data points
+            classes = np.unique(y)
+            colors = ['g', 'r'] if len(classes) == 2 else plt.cm.rainbow(np.linspace(0, 1, len(classes)))
+            for i, cls in enumerate(classes):
+                mask = y == cls
+                ax.scatter(X[mask, 0], X[mask, 1], c=[colors[i]],
+                          label=f'Class {cls}', alpha=0.6, s=100)
+            
+            # Customize plot
+            ax.set_xlabel(feature_names[0], fontsize=12)
+            ax.set_ylabel(feature_names[1], fontsize=12)
+            ax.set_title(f'SVM Decision Boundary\nKernel: {svm_model.kernel}, C: {svm_model.C}',
+                        fontsize=14, pad=20)
+            
+            # Add legend
+            ax.legend(loc='upper right', fontsize=10)
+            
+            # Add grid
+            ax.grid(True, linestyle='--', alpha=0.3)
+            
+            plt.tight_layout()
+            return fig
+            
+        except Exception as e:
+            self.show_error("Visualization Error", str(e))
+            return None
+
+    def calculate_specificity(self, y_true, y_pred):
+        """Calculate specificity from confusion matrix"""
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        return tn / (tn + fp)
+
+    def show_metrics(self, target_name, y_true, y_pred, y_proba, model):
+        """Display SVM metrics in a separate window"""
+        try:
+            # Calculate metrics
+            accuracy = accuracy_score(y_true, y_pred)
+            precision = precision_score(y_true, y_pred, average='weighted')
+            recall = recall_score(y_true, y_pred, average='weighted')
+            f1 = f1_score(y_true, y_pred, average='weighted')
+            specificity = self.calculate_specificity(y_true, y_pred)
+            
+            # Calculate AUC for binary classification
+            auc_score = None
+            if len(np.unique(y_true)) == 2:
+                fpr, tpr, _ = roc_curve(y_true, y_proba[:, 1])
+                auc_score = auc(fpr, tpr)
+            
+            # Create metrics window
+            metrics_window = tk.Toplevel(self.root)
+            metrics_window.title("SVM Metrics")
+            metrics_window.geometry("400x300")
+            
+            # Create metrics text
+            metrics_text = f"SVM Classification Metrics\n"
+            metrics_text += f"Target Variable: {target_name}\n\n"
+            metrics_text += f"Accuracy:    {accuracy:.4f}\n"
+            metrics_text += f"Precision:   {precision:.4f}\n"
+            metrics_text += f"Recall:      {recall:.4f}\n"
+            metrics_text += f"F1-Score:    {f1:.4f}\n"
+            metrics_text += f"Specificity: {specificity:.4f}\n"
+            if auc_score is not None:
+                metrics_text += f"AUC:         {auc_score:.4f}\n"
+            
+            # Display metrics
+            metrics_label = ttk.Label(metrics_window, text=metrics_text,
+                                    font=('Courier', 12), justify='left')
+            metrics_label.pack(padx=20, pady=20)
+            
+            # Add close button
+            ttk.Button(metrics_window, text="Close",
+                      command=metrics_window.destroy).pack(pady=10)
+            
         except Exception as e:
             self.show_error("Metric Calculation Error", str(e))
-
-    def display_results(self, conf_matrix, class_report, specificity, y_test, y_pred_proba=None):
-        """Enhanced results display"""
-        fig, axes = plt.subplots(1, 3 if y_pred_proba is not None else 2, figsize=(15, 5))
-        
-        # Confusion Matrix
-        sns.heatmap(conf_matrix, annot=True, fmt='d', ax=axes[0])
-        axes[0].set_title('Confusion Matrix')
-        
-        # ROC curve if binary classification
-        if y_pred_proba is not None:
-            fpr, tpr, _ = roc_curve(y_test, y_pred_proba[:, 1])
-            roc_auc = auc(fpr, tpr)
-            
-            axes[1].plot(fpr, tpr, label=f'ROC (AUC = {roc_auc:.2f})')
-            axes[1].plot([0, 1], [0, 1], 'k--')
-            axes[1].set_title('ROC Curve')
-            axes[1].legend()
-            
-            metrics_ax = axes[2]
-        else:
-            metrics_ax = axes[1]
-        
-        # Metrics text
-        metrics_text = f"Classification Report:\n\n{class_report}"
-        if specificity is not None:
-            metrics_text += f"\nSpecificity: {specificity:.4f}"
-            
-        metrics_ax.text(0.05, 0.95, metrics_text,
-                       fontfamily='monospace', fontsize=10,
-                       verticalalignment='top')
-        metrics_ax.axis('off')
-        
-        plt.tight_layout()
-        self.show_plot(fig)
 
     def show_plot(self, fig, additional_info=None):
         """Helper to show plots in Tkinter window"""
@@ -523,8 +835,63 @@ class DataMiningSVMGUI:
         dialog.wait_window()
         return result[0]
 
+    def visualize_decision_boundary(self, X, y, svm_model, feature_names):
+        """Visualize SVM decision boundary with two features"""
+        try:
+            # Create figure
+            fig, ax = plt.subplots(figsize=(8, 6))
+            
+            # Create mesh grid
+            x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+            y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, 200),
+                               np.linspace(y_min, y_max, 200))
+            
+            # Get predictions for mesh grid points
+            Z = svm_model.predict(np.c_[xx.ravel(), yy.ravel()])
+            Z = Z.reshape(xx.shape)
+            
+            # Plot decision regions
+            ax.contourf(xx, yy, Z, alpha=0.4, cmap='RdYlBu')
+            
+            # Plot decision boundary and margins
+            if hasattr(svm_model, 'decision_function'):
+                Z_decision = svm_model.decision_function(np.c_[xx.ravel(), yy.ravel()])
+                Z_decision = Z_decision.reshape(xx.shape)
+                ax.contour(xx, yy, Z_decision, colors='k',
+                          levels=[-1, 0, 1], alpha=0.5,
+                          linestyles=['--', '-', '--'])
+            
+            # Plot support vectors if available
+            if hasattr(svm_model, 'support_vectors_'):
+                ax.scatter(svm_model.support_vectors_[:, 0], svm_model.support_vectors_[:, 1],
+                          s=100, facecolors='none', edgecolors='k',
+                          label='Support Vectors')
+            
+            # Plot data points
+            scatter = ax.scatter(X[:, 0], X[:, 1], c=y, cmap='RdYlBu',
+                               label='Data Points')
+            plt.colorbar(scatter)
+            
+            # Set labels and title
+            ax.set_xlabel(feature_names[0])
+            ax.set_ylabel(feature_names[1])
+            ax.set_title('SVM Decision Boundary')
+            ax.legend()
+            
+            return fig
+            
+        except Exception as e:
+            self.show_error("Visualization Error", str(e))
+            return None
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DataMiningSVMGUI(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = DataMiningSVMGUI(root)
+        root.protocol("WM_DELETE_WINDOW", root.quit)  # Handle window closing
+        root.mainloop()
+    except Exception as e:
+        print(f"Error starting application: {str(e)}")
+        import traceback
+        traceback.print_exc()
